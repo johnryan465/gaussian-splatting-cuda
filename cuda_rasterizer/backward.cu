@@ -450,9 +450,10 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
     const float ddely_dy = 0.5 * d_H;
 
     // Traverse all Gaussians
-    __shared__ float2 s_dL_dmean2D[BLOCK_SIZE];
-    __shared__ float4 s_dL_dconic2D[BLOCK_SIZE];
-    __shared__ float s_dL_dopacity[BLOCK_SIZE];
+    const int D = 5;
+    __shared__ float2 s_dL_dmean2D[D * BLOCK_SIZE];
+    __shared__ float4 s_dL_dconic2D[D * BLOCK_SIZE];
+    __shared__ float s_dL_dopacity[D * BLOCK_SIZE];
     //    __shared__ float s_dL_dcolors[BLOCK_SIZE * C];
     for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE) {
         block.sync();
@@ -547,26 +548,45 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
             // Update gradients w.r.t. opacity of the Gaussian
             //            atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha);
 
-            atomicAdd(&s_dL_dmean2D[j].x, dL_dG * dG_ddelx * ddelx_dx);
-            atomicAdd(&s_dL_dmean2D[j].y, dL_dG * dG_ddely * ddely_dy);
+            int idx = j * D + (block.thread_rank() % D);
+
+            atomicAdd(&s_dL_dmean2D[idx].x, dL_dG * dG_ddelx * ddelx_dx);
+            atomicAdd(&s_dL_dmean2D[idx].y, dL_dG * dG_ddely * ddely_dy);
             //
             //                // Update gradients w.r.t. 2D covariance (2x2 matrix, symmetric)
-            atomicAdd(&s_dL_dconic2D[j].x, -0.5f * gdx * d.x * dL_dG);
-            atomicAdd(&s_dL_dconic2D[j].y, -0.5f * gdx * d.y * dL_dG);
-            atomicAdd(&s_dL_dconic2D[j].w, -0.5f * gdy * d.y * dL_dG);
+            atomicAdd(&s_dL_dconic2D[idx].x, -0.5f * gdx * d.x * dL_dG);
+            atomicAdd(&s_dL_dconic2D[idx].y, -0.5f * gdx * d.y * dL_dG);
+            atomicAdd(&s_dL_dconic2D[idx].w, -0.5f * gdy * d.y * dL_dG);
             //
             //                // Update gradients w.r.t. opacity of the Gaussian
-            atomicAdd(&(s_dL_dopacity[j]), G * dL_dalpha);
+            atomicAdd(&(s_dL_dopacity[idx]), G * dL_dalpha);
         }
         //        block.sync();
         if (block.thread_rank() < max_iterations) {
+
             const int coll_id = collected_id[block.thread_rank()];
-            atomicAdd(&(dL_dmean2D[coll_id].x), s_dL_dmean2D[block.thread_rank()].x);
-            atomicAdd(&(dL_dmean2D[coll_id].y), s_dL_dmean2D[block.thread_rank()].y);
-            atomicAdd(&(dL_dconic2D[coll_id].x), s_dL_dconic2D[block.thread_rank()].x);
-            atomicAdd(&(dL_dconic2D[coll_id].y), s_dL_dconic2D[block.thread_rank()].y);
-            atomicAdd(&(dL_dconic2D[coll_id].w), s_dL_dconic2D[block.thread_rank()].w);
-            atomicAdd(&(dL_dopacity[coll_id]), s_dL_dopacity[block.thread_rank()]);
+            float dL_dmean2D_x = 0;
+            float dL_dmean2D_y = 0;
+            float dL_dconic2D_x = 0;
+            float dL_dconic2D_y = 0;
+            float dL_dconic2D_w = 0;
+            float dL_dopacity_ = 0;
+
+            for (int z = 0; z < D; z++){
+                dL_dmean2D_x += s_dL_dmean2D[block.thread_rank() + z].x;
+                dL_dmean2D_y += s_dL_dmean2D[block.thread_rank() + z].y;
+                dL_dconic2D_x += s_dL_dconic2D[block.thread_rank() + z].x;
+                dL_dconic2D_y += s_dL_dconic2D[block.thread_rank() + z].y;
+                dL_dconic2D_w += s_dL_dconic2D[block.thread_rank() + z].w;
+                dL_dopacity_ += s_dL_dopacity[block.thread_rank() + z];
+            }
+
+            atomicAdd(&(dL_dmean2D[coll_id].x), dL_dmean2D_x);
+            atomicAdd(&(dL_dmean2D[coll_id].y), dL_dmean2D_y);
+            atomicAdd(&(dL_dconic2D[coll_id].x), dL_dconic2D_x);
+            atomicAdd(&(dL_dconic2D[coll_id].y), dL_dconic2D_y);
+            atomicAdd(&(dL_dconic2D[coll_id].w), dL_dconic2D_w);
+            atomicAdd(&(dL_dopacity[coll_id]), dL_dopacity_);
             //            for (int j = 0; j < C; j++) {
             //                atomicAdd(&(dL_dcolors[coll_id * C + j]),  s_dL_dcolors[block.thread_rank() * C + j]);
             //            }

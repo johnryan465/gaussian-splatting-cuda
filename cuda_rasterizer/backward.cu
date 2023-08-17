@@ -451,6 +451,26 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
 
     // Traverse all Gaussians
     const int D = 5;
+
+    const int B = 8;
+    /*int perm[B][B] = {
+        {0, 1, 2, 3, 4},
+        {4, 0, 1, 2, 3},
+        {3, 4, 0, 1, 2},
+        {2, 3, 4, 0, 1},
+        {1, 2, 3, 4, 0},
+    }; */
+    int perm[8][8] = {
+        {0, 1, 2, 3, 4, 5, 6, 7},
+        {7, 0, 1, 2, 3, 4, 5, 6},
+        {6, 7, 0, 1, 2, 3, 4, 5},
+        {5, 6, 7, 0, 1, 2, 3, 4},
+        {4, 5, 6, 7, 0, 1, 2, 3},
+        {3, 4, 5, 6, 7, 0, 1, 2},
+        {2, 3, 4, 5, 6, 7, 0, 1},
+        {1, 2, 3, 4, 5, 6, 7, 0},
+    };
+
     __shared__ float2 s_dL_dmean2D[D * BLOCK_SIZE];
     __shared__ float4 s_dL_dconic2D[D * BLOCK_SIZE];
     __shared__ float s_dL_dopacity[D * BLOCK_SIZE];
@@ -475,6 +495,8 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
         block.sync();
 
         const int max_iterations = min(BLOCK_SIZE, toDo);
+        float buff[6][B] = {};
+        int idx_tracker[B] = {};
         for (int j = 0; !done && j < max_iterations; j++) {
             // Keep track of current Gaussian ID. Skip, if this one
             // is behind the last contributor for this pixel.
@@ -548,22 +570,60 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
             // Update gradients w.r.t. opacity of the Gaussian
             //            atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha);
 
-            int idx = j * D + (block.thread_rank() % D);
+            // int idx = j * D + (block.thread_rank() % D);
 
-            atomicAdd(&s_dL_dmean2D[idx].x, dL_dG * dG_ddelx * ddelx_dx);
-            atomicAdd(&s_dL_dmean2D[idx].y, dL_dG * dG_ddely * ddely_dy);
+            // We want to reduce the number of waiting atomicAdds, the issue here is that all threads
+            // will be looping through the same list in the same order, which is the worst possible case
+            // Speed up 1: Use multiple partial sums to reduce the number of atomicAdds
+            // Speed up 2: Use a different order for each thread to reduce the number of conflicts
+            // The atomicAdd doesn't need to be updated in any particular order, but it must be computed in the same order
+            // This gives us the ability to do the following approach
+            // Each thread computes the first N sets of values, where N is the buffer size.
+            // Each thread has a different permutation of the order in which they evict and perform the atomicAdd
+            // If we can choose sufficently large buffers and sufficiently different permutations, we can reduce the number of atomicAdds
+            // which conflicts with the other threads.
+            const int perm_offset = perm[block.thread_rank() % B][j % B]; 
+            //if (j >= B){
+            const int updating_idx = idx_tracker[perm_offset]*D + (block.thread_rank() % D);
+            //printf("Updating idx: %d\n", updating_idx);  
+            atomicAdd(&s_dL_dmean2D[updating_idx].x, buff[0][perm_offset]);
+            atomicAdd(&s_dL_dmean2D[updating_idx].y, buff[1][perm_offset]);
             //
             //                // Update gradients w.r.t. 2D covariance (2x2 matrix, symmetric)
-            atomicAdd(&s_dL_dconic2D[idx].x, -0.5f * gdx * d.x * dL_dG);
-            atomicAdd(&s_dL_dconic2D[idx].y, -0.5f * gdx * d.y * dL_dG);
-            atomicAdd(&s_dL_dconic2D[idx].w, -0.5f * gdy * d.y * dL_dG);
+            atomicAdd(&s_dL_dconic2D[updating_idx].x, buff[2][perm_offset]);
+            atomicAdd(&s_dL_dconic2D[updating_idx].y, buff[3][perm_offset]);
+            atomicAdd(&s_dL_dconic2D[updating_idx].w, buff[4][perm_offset]);
             //
             //                // Update gradients w.r.t. opacity of the Gaussian
-            atomicAdd(&(s_dL_dopacity[idx]), G * dL_dalpha);
+            atomicAdd(&(s_dL_dopacity[updating_idx]),  buff[5][perm_offset]);
+            //}
+            
+            // Update the buffer
+            buff[0][perm_offset] = dL_dG * dG_ddelx * ddelx_dx;
+            buff[1][perm_offset] = dL_dG * dG_ddely * ddely_dy;
+            buff[2][perm_offset] = -0.5f * gdx * d.x * dL_dG;
+            buff[3][perm_offset] = -0.5f * gdx * d.y * dL_dG;
+            buff[4][perm_offset] = -0.5f * gdy * d.y * dL_dG;
+            buff[5][perm_offset] = G * dL_dalpha;
+            idx_tracker[perm_offset] = j;
+                   
+        }
+        for(int j =  B; j < B ; j++){
+            const int perm_offset = perm[block.thread_rank() % B][j % B]; 
+            const int updating_idx = idx_tracker[perm_offset];
+            atomicAdd(&s_dL_dmean2D[updating_idx].x, buff[0][perm_offset]);
+            atomicAdd(&s_dL_dmean2D[updating_idx].y, buff[1][perm_offset]);
+            //
+            //                // Update gradients w.r.t. 2D covariance (2x2 matrix, symmetric)
+            atomicAdd(&s_dL_dconic2D[updating_idx].x, buff[2][perm_offset]);
+            atomicAdd(&s_dL_dconic2D[updating_idx].y, buff[3][perm_offset]);
+            atomicAdd(&s_dL_dconic2D[updating_idx].w, buff[4][perm_offset]);
+            //
+            //                // Update gradients w.r.t. opacity of the Gaussian
+            atomicAdd(&(s_dL_dopacity[updating_idx]),  buff[5][perm_offset]);
         }
         //        block.sync();
         if (block.thread_rank() < max_iterations) {
-
             const int coll_id = collected_id[block.thread_rank()];
             float dL_dmean2D_x = 0;
             float dL_dmean2D_y = 0;
@@ -586,10 +646,7 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
             atomicAdd(&(dL_dconic2D[coll_id].x), dL_dconic2D_x);
             atomicAdd(&(dL_dconic2D[coll_id].y), dL_dconic2D_y);
             atomicAdd(&(dL_dconic2D[coll_id].w), dL_dconic2D_w);
-            atomicAdd(&(dL_dopacity[coll_id]), dL_dopacity_);
-            //            for (int j = 0; j < C; j++) {
-            //                atomicAdd(&(dL_dcolors[coll_id * C + j]),  s_dL_dcolors[block.thread_rank() * C + j]);
-            //            }
+            atomicAdd(&(dL_dopacity[coll_id]), dL_dopacity_);          
         }
     }
 }

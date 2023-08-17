@@ -503,19 +503,33 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
             // gradients w.r.t. alpha (blending factor for a Gaussian/pixel
             // pair).
             float dL_dalpha = 0.0f;
-            for (int ch = 0; ch < C; ch++) {
-                const float c = collected_colors[ch * BLOCK_SIZE + j];
+            // Update color and alpha
+            {
+                const float red = collected_colors[0 * BLOCK_SIZE + j];
                 // Update last color (to be used in the next iteration)
-                accum_rec[ch] = last_alpha * last_color[ch] + (1.f - last_alpha) * accum_rec[ch];
-                last_color[ch] = c;
+                accum_rec[0] = last_alpha * last_color[0] + (1.f - last_alpha) * accum_rec[0];
+                last_color[0] = red;
 
-                const float dL_dchannel = dL_dpixel[ch];
-                dL_dalpha += (c - accum_rec[ch]) * dL_dchannel;
+                const float green = collected_colors[1 * BLOCK_SIZE + j];
+                // Update last color (to be used in the next iteration)
+                accum_rec[1] = last_alpha * last_color[1] + (1.f - last_alpha) * accum_rec[1];
+                last_color[1] = green;
+
+                const float blue = collected_colors[2 * BLOCK_SIZE + j];
+                // Update last color (to be used in the next iteration)
+                accum_rec[2] = last_alpha * last_color[2] + (1.f - last_alpha) * accum_rec[2];
+                last_color[2] = blue;
+
+                dL_dalpha += (red - accum_rec[0]) * dL_dpixel[0];
+                dL_dalpha += (green - accum_rec[1]) * dL_dpixel[1];
+                dL_dalpha += (blue - accum_rec[2]) * dL_dpixel[2];
                 // Update the gradients w.r.t. color of the Gaussian.
                 // Atomic, since this pixel is just one of potentially
                 // many that were affected by this Gaussian.
-                atomicAdd(&(dL_dcolors[global_id * C + ch]), dchannel_dcolor * dL_dchannel);
-                //                atomicAdd(&s_dL_dcolors[j * C + ch], dchannel_dcolor * dL_dchannel);
+                atomicAdd(&(dL_dcolors[global_id * C + 0]), dchannel_dcolor * dL_dpixel[0]);
+                atomicAdd(&(dL_dcolors[global_id * C + 1]), dchannel_dcolor * dL_dpixel[1]);
+                atomicAdd(&(dL_dcolors[global_id * C + 2]), dchannel_dcolor * dL_dpixel[2]);
+                // atomicAdd(&s_dL_dcolors[j * C + ch], dchannel_dcolor * dL_dchannel);
             }
             dL_dalpha *= T;
             // Update last alpha (to be used in the next iteration)
@@ -536,32 +550,22 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
             const float dG_ddelx = -gdx * con_o.x - gdy * con_o.y;
             const float dG_ddely = -gdy * con_o.z - gdx * con_o.y;
 
-            // Update gradients w.r.t. 2D mean position of the Gaussian
-            //            atomicAdd(&dL_dmean2D[global_id].x, dL_dG * dG_ddelx * ddelx_dx);
-            //            atomicAdd(&dL_dmean2D[global_id].y, dL_dG * dG_ddely * ddely_dy);
 
-            // Update gradients w.r.t. 2D covariance (2x2 matrix, symmetric)
-            //            atomicAdd(&dL_dconic2D[global_id].x, -0.5f * gdx * d.x * dL_dG);
-            //            atomicAdd(&dL_dconic2D[global_id].y, -0.5f * gdx * d.y * dL_dG);
-            //            atomicAdd(&dL_dconic2D[global_id].w, -0.5f * gdy * d.y * dL_dG);
-
-            // Update gradients w.r.t. opacity of the Gaussian
-            //            atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha);
 
             int idx = j * D + (block.thread_rank() % D);
 
             atomicAdd(&s_dL_dmean2D[idx].x, dL_dG * dG_ddelx * ddelx_dx);
             atomicAdd(&s_dL_dmean2D[idx].y, dL_dG * dG_ddely * ddely_dy);
             //
-            //                // Update gradients w.r.t. 2D covariance (2x2 matrix, symmetric)
+            // Update gradients w.r.t. 2D covariance (2x2 matrix, symmetric)
             atomicAdd(&s_dL_dconic2D[idx].x, -0.5f * gdx * d.x * dL_dG);
             atomicAdd(&s_dL_dconic2D[idx].y, -0.5f * gdx * d.y * dL_dG);
             atomicAdd(&s_dL_dconic2D[idx].w, -0.5f * gdy * d.y * dL_dG);
             //
-            //                // Update gradients w.r.t. opacity of the Gaussian
+            // Update gradients w.r.t. opacity of the Gaussian
             atomicAdd(&(s_dL_dopacity[idx]), G * dL_dalpha);
+
         }
-        //        block.sync();
         if (block.thread_rank() < max_iterations) {
 
             const int coll_id = collected_id[block.thread_rank()];

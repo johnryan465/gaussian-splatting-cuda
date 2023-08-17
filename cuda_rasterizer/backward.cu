@@ -451,9 +451,9 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
 
     // Traverse all Gaussians
     const int D = 5;
-    __shared__ float2 s_dL_dmean2D[D][BLOCK_SIZE];
-    __shared__ float4 s_dL_dconic2D[D][BLOCK_SIZE];
-    __shared__ float s_dL_dopacity[D][BLOCK_SIZE];
+    __shared__ float2 s_dL_dmean2D[D * BLOCK_SIZE];
+    __shared__ float4 s_dL_dconic2D[D * BLOCK_SIZE];
+    __shared__ float s_dL_dopacity[D * BLOCK_SIZE];
     //    __shared__ float s_dL_dcolors[BLOCK_SIZE * C];
     for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE) {
         block.sync();
@@ -468,9 +468,9 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
                 //                s_dL_dcolors[block.thread_rank() * C + j] = 0;
             }
             for (int d = 0; d < D; d++) {
-                s_dL_dmean2D[d][block.thread_rank()] = float2{0, 0};
-                s_dL_dconic2D[d][block.thread_rank()] = float4{0, 0, 0, 0};
-                s_dL_dopacity[d][block.thread_rank()] = 0;
+                s_dL_dmean2D[d + (block.thread_rank() * D)] = float2{0, 0};
+                s_dL_dconic2D[d + (block.thread_rank() * D)] = float4{0, 0, 0, 0};
+                s_dL_dopacity[d + (block.thread_rank() * D)] = 0;
             }
         }
         block.sync();
@@ -555,16 +555,16 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
 
             int idx = (block.thread_rank() % D);
 
-            atomicAdd(&s_dL_dmean2D[idx][j].x, dL_dG * dG_ddelx * ddelx_dx);
-            atomicAdd(&s_dL_dmean2D[idx][j].y, dL_dG * dG_ddely * ddely_dy);
+            atomicAdd(&s_dL_dmean2D[idx + j*D].x, dL_dG * dG_ddelx * ddelx_dx);
+            atomicAdd(&s_dL_dmean2D[idx + j*D].y, dL_dG * dG_ddely * ddely_dy);
             //
             // Update gradients w.r.t. 2D covariance (2x2 matrix, symmetric)
-            atomicAdd(&s_dL_dconic2D[idx][j].x, -0.5f * gdx * d.x * dL_dG);
-            atomicAdd(&s_dL_dconic2D[idx][j].y, -0.5f * gdx * d.y * dL_dG);
-            atomicAdd(&s_dL_dconic2D[idx][j].w, -0.5f * gdy * d.y * dL_dG);
+            atomicAdd(&s_dL_dconic2D[idx + j*D].x, -0.5f * gdx * d.x * dL_dG);
+            atomicAdd(&s_dL_dconic2D[idx + j*D].y, -0.5f * gdx * d.y * dL_dG);
+            atomicAdd(&s_dL_dconic2D[idx + j*D].w, -0.5f * gdy * d.y * dL_dG);
             //
             // Update gradients w.r.t. opacity of the Gaussian
-            atomicAdd(&(s_dL_dopacity[idx][j]), G * dL_dalpha);
+            atomicAdd(&(s_dL_dopacity[idx + j*D]), G * dL_dalpha);
 
         }
         if (block.thread_rank() < max_iterations) {
@@ -578,12 +578,12 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
             float dL_dopacity_ = 0;
 
             for (int z = 0; z < D; z++){
-                dL_dmean2D_x += s_dL_dmean2D[z][block.thread_rank()].x;
-                dL_dmean2D_y += s_dL_dmean2D[z][block.thread_rank() ].y;
-                dL_dconic2D_x += s_dL_dconic2D[z][block.thread_rank()].x;
-                dL_dconic2D_y += s_dL_dconic2D[z][block.thread_rank() ].y;
-                dL_dconic2D_w += s_dL_dconic2D[z][block.thread_rank()].w;
-                dL_dopacity_ += s_dL_dopacity[z][block.thread_rank() ];
+                dL_dmean2D_x += s_dL_dmean2D[z + block.thread_rank()*D].x;
+                dL_dmean2D_y += s_dL_dmean2D[z + block.thread_rank()*D ].y;
+                dL_dconic2D_x += s_dL_dconic2D[z + block.thread_rank()*D].x;
+                dL_dconic2D_y += s_dL_dconic2D[z + block.thread_rank()*D ].y;
+                dL_dconic2D_w += s_dL_dconic2D[z + block.thread_rank()*D].w;
+                dL_dopacity_ += s_dL_dopacity[z + block.thread_rank()*D ];
             }
 
             atomicAdd(&(dL_dmean2D[coll_id].x), dL_dmean2D_x);

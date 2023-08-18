@@ -450,7 +450,7 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
     const float ddely_dy = 0.5 * d_H;
 
     // Traverse all Gaussians
-    const int D = 5;
+    const int D = 4;
     __shared__ float2 s_dL_dmean2D[D * BLOCK_SIZE];
     __shared__ float4 s_dL_dconic2D[D * BLOCK_SIZE];
     __shared__ float s_dL_dopacity[D * BLOCK_SIZE];
@@ -551,18 +551,27 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
             const float dG_ddelx = -gdx * con_o.x - gdy * con_o.y;
             const float dG_ddely = -gdy * con_o.z - gdx * con_o.y;
 
-            int idx = (block.thread_rank() % D);
+            // To improve cache locality, we want to use adjacent memory for threads
+            // We have storage of size D * BLOCK_SIZE
 
-            atomicAdd(&s_dL_dmean2D[idx + j*D].x, dL_dG * dG_ddelx * ddelx_dx);
-            atomicAdd(&s_dL_dmean2D[idx + j*D].y, dL_dG * dG_ddely * ddely_dy);
+
+
+            int idx = ((block.thread_rank() % D)*BLOCK_SIZE) + j;
+            // This idx goes i, i+D, i+2D, i+3D
+            // We have B  
+            
+            
+
+            atomicAdd(&s_dL_dmean2D[idx].x, dL_dG * dG_ddelx * ddelx_dx);
+            atomicAdd(&s_dL_dmean2D[idx].y, dL_dG * dG_ddely * ddely_dy);
             //
             // Update gradients w.r.t. 2D covariance (2x2 matrix, symmetric)
-            atomicAdd(&s_dL_dconic2D[idx + j*D].x, -0.5f * gdx * d.x * dL_dG);
-            atomicAdd(&s_dL_dconic2D[idx + j*D].y, -0.5f * gdx * d.y * dL_dG);
-            atomicAdd(&s_dL_dconic2D[idx + j*D].w, -0.5f * gdy * d.y * dL_dG);
+            atomicAdd(&s_dL_dconic2D[idx].x, -0.5f * gdx * d.x * dL_dG);
+            atomicAdd(&s_dL_dconic2D[idx].y, -0.5f * gdx * d.y * dL_dG);
+            atomicAdd(&s_dL_dconic2D[idx].w, -0.5f * gdy * d.y * dL_dG);
             //
             // Update gradients w.r.t. opacity of the Gaussian
-            atomicAdd(&(s_dL_dopacity[idx + j*D]), G * dL_dalpha);
+            atomicAdd(&(s_dL_dopacity[idx]), G * dL_dalpha);
 
         }
         if (block.thread_rank() < max_iterations) {
@@ -576,12 +585,12 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
             float dL_dopacity_ = 0;
 
             for (int z = 0; z < D; z++){
-                dL_dmean2D_x += s_dL_dmean2D[z + block.thread_rank()*D].x;
-                dL_dmean2D_y += s_dL_dmean2D[z + block.thread_rank()*D ].y;
-                dL_dconic2D_x += s_dL_dconic2D[z + block.thread_rank()*D].x;
-                dL_dconic2D_y += s_dL_dconic2D[z + block.thread_rank()*D ].y;
-                dL_dconic2D_w += s_dL_dconic2D[z + block.thread_rank()*D].w;
-                dL_dopacity_ += s_dL_dopacity[z + block.thread_rank()*D ];
+                dL_dmean2D_x += s_dL_dmean2D[z*BLOCK_SIZE + block.thread_rank()].x;
+                dL_dmean2D_y += s_dL_dmean2D[z*BLOCK_SIZE + block.thread_rank() ].y;
+                dL_dconic2D_x += s_dL_dconic2D[z*BLOCK_SIZE + block.thread_rank()].x;
+                dL_dconic2D_y += s_dL_dconic2D[z*BLOCK_SIZE + block.thread_rank() ].y;
+                dL_dconic2D_w += s_dL_dconic2D[z*BLOCK_SIZE + block.thread_rank()].w;
+                dL_dopacity_ += s_dL_dopacity[z*BLOCK_SIZE + block.thread_rank() ];
             }
 
             atomicAdd(&(dL_dmean2D[coll_id].x), dL_dmean2D_x);

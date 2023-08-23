@@ -391,16 +391,16 @@ __constant__ float d_bg_color[3]; // RGB
 namespace cg = cooperative_groups;
 
 
-__forceinline__ __device__ void atomicAggIncNine(cg::coalesced_group g,
+__forceinline__ __device__ void atomicAggIncSeven(cg::coalesced_group g,
     float *sum_1, float input_1,
     float *sum_2, float input_2,
     float *sum_3, float input_3,
     float *sum_4, float input_4,
     float *sum_5, float input_5,
     float *sum_6, float input_6,
-    float *sum_7, float input_7,
-    float *sum_8, float input_8,
-    float *sum_9, float input_9)
+    float *sum_7, float input_7/*,
+    float *sum_8, float input_8/*,
+    float *sum_9, float input_9*/)
 {
     const int tile_sz = 32;
     auto tile = cg::tiled_partition(g, tile_sz);
@@ -413,8 +413,8 @@ __forceinline__ __device__ void atomicAggIncNine(cg::coalesced_group g,
         input_5 += tile.shfl_down(input_5, i);
         input_6 += tile.shfl_down(input_6, i);
         input_7 += tile.shfl_down(input_7, i);
-        input_8 += tile.shfl_down(input_8, i);
-        input_9 += tile.shfl_down(input_9, i);
+        //input_8 += tile.shfl_down(input_8, i);
+        //input_9 += tile.shfl_down(input_9, i);
     }    
 
     if (tile.thread_rank() == 0){
@@ -425,8 +425,8 @@ __forceinline__ __device__ void atomicAggIncNine(cg::coalesced_group g,
         atomicAdd(sum_5, input_5);
         atomicAdd(sum_6, input_6);
         atomicAdd(sum_7, input_7);
-        atomicAdd(sum_8, input_8);
-        atomicAdd(sum_9, input_9);
+        //atomicAdd(sum_8, input_8);
+        //atomicAdd(sum_9, input_9);
     }
 }
 
@@ -581,18 +581,26 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
 
             cg::coalesced_group g = cg::coalesced_threads();
 
-            atomicAggIncNine(g, 
+            atomicAggIncSeven(g, 
                 &(dL_dcolors[idx * C + 0]), dchannel_dcolor * dL_dpixel[0],
                 &(dL_dcolors[idx * C + 1]),  dchannel_dcolor * dL_dpixel[1],
                 &(dL_dcolors[idx * C + 2]),  dchannel_dcolor * dL_dpixel[2],
-                &(dL_dmean2D[idx].x), dL_dG * dG_ddelx * ddelx_dx,
-                &(dL_dmean2D[idx].y), dL_dG * dG_ddely * ddely_dy,
+                //&(dL_dmean2D[idx].x), dL_dG * dG_ddelx * ddelx_dx,
+                //&(dL_dmean2D[idx].y), dL_dG * dG_ddely * ddely_dy,
                 &(dL_dopacity[idx]), G * dL_dalpha,
                 &dL_dconic2D[idx].x, -0.5f * gdx * d.x * dL_dG,
                 &dL_dconic2D[idx].y, -0.5f * gdx * d.y * dL_dG,
                 &dL_dconic2D[idx].w, -0.5f * gdy * d.y * dL_dG
             );
-
+            //atomicAdd(&(dL_dcolors[idx * C + 0]), dchannel_dcolor * dL_dpixel[0]);
+            //atomicAdd(&(dL_dcolors[idx * C + 1]), dchannel_dcolor * dL_dpixel[1]);
+            //atomicAdd(&(dL_dcolors[idx * C + 2]), dchannel_dcolor * dL_dpixel[2]);
+            atomicAdd(&(dL_dmean2D[idx].x), dL_dG * dG_ddelx * ddelx_dx);
+            atomicAdd(&(dL_dmean2D[idx].y), dL_dG * dG_ddely * ddely_dy);
+            //atomicAdd(&(dL_dopacity[idx]), G * dL_dalpha);
+            /*atomicAdd(&dL_dconic2D[idx].x, -0.5f * gdx * d.x * dL_dG);
+            atomicAdd(&dL_dconic2D[idx].y, -0.5f * gdx * d.y * dL_dG);
+            atomicAdd(&dL_dconic2D[idx].w, -0.5f * gdy * d.y * dL_dG);*/
         }
     }
 }

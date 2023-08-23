@@ -389,6 +389,35 @@ __constant__ int d_W;
 __constant__ int d_H;
 __constant__ float d_bg_color[3]; // RGB
 
+namespace cg = cooperative_groups;
+
+template <int tile_sz>
+__device__ float reduce_sum_tile_shfl(cg::__v1::thread_block_tile<tile_sz> g, float val)
+{
+    // Each iteration halves the number of active threads
+    // Each thread adds its partial sum[i] to sum[lane+i]
+    for (int i = tile_sz / 2; i > 0; i /= 2) {
+        val += g.shfl_down(val, i);
+    }
+
+    return val; // note: only thread 0 will return full sum
+}
+
+
+__device__ void atomicAggInc(cg::coalesced_group g, float *sum, float input)
+{
+    //cg::coalesced_group g = cg::coalesced_threads();
+    const int tile_sz = 32;
+    auto tile = cg::tiled_partition(g, tile_sz);
+    float tile_sum = input;
+    #pragma unroll    
+    for (int i = tile.size() / 2; i > 0; i /= 2) {
+        tile_sum += tile.shfl_down(tile_sum, i);
+    }    
+
+    if (tile.thread_rank() == 0) atomicAdd(sum, tile_sum);
+}
+
 template <uint32_t C>
 __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
     renderBackwardsCUDA(
@@ -453,12 +482,6 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
     __shared__ float2 collected_colors_rg[BLOCK_SIZE];
     __shared__ float collected_colors_b[BLOCK_SIZE];
 
-    __shared__ float2 s_dL_dmean2D[D * BLOCK_SIZE];
-    __shared__ float2 s_dL_dconic2D_xy[D * BLOCK_SIZE];
-    __shared__ float s_dL_dconic2D_w[D * BLOCK_SIZE];
-    __shared__ float s_dL_dopacity[D * BLOCK_SIZE];
-    __shared__ float2 s_dL_dcolors_rg[D * BLOCK_SIZE];
-    __shared__ float s_dL_dcolors_b[D * BLOCK_SIZE];
     // Traverse all Gaussians
     for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE) {
         block.sync();
@@ -471,15 +494,6 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
             collected_colors_rg[block.thread_rank()].x = colors[coll_id * C + 0];
             collected_colors_rg[block.thread_rank()].y = colors[coll_id * C + 1];
             collected_colors_b[block.thread_rank()] = colors[coll_id * C + 2];
-
-            for (int d = 0; d < D; d++) {
-                s_dL_dmean2D[d + (block.thread_rank() * D)] = float2{0.f, 0.f};
-                s_dL_dconic2D_xy[d + (block.thread_rank() * D)] = float2{0.f, 0.f};
-                s_dL_dconic2D_w[d + (block.thread_rank() * D)] = 0.f;
-                s_dL_dopacity[d + (block.thread_rank() * D)] = 0.f;
-                s_dL_dcolors_rg[d + (block.thread_rank() * D)] = float2{0.f, 0.f};
-                s_dL_dcolors_b[d + (block.thread_rank() * D)] = 0.f;
-            }
         }
         block.sync();
 
@@ -530,10 +544,11 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
             // many that were affected by this Gaussian.
             T = T / (1.f - alpha);
             const float dchannel_dcolor = alpha * T;
-            const int idx = (block.thread_rank() % D) + j * D;
-            atomicAdd(&(s_dL_dcolors_rg[idx].x), dchannel_dcolor * dL_dpixel[0]);
-            atomicAdd(&(s_dL_dcolors_rg[idx].y), dchannel_dcolor * dL_dpixel[1]);
-            atomicAdd(&(s_dL_dcolors_b[idx]), dchannel_dcolor * dL_dpixel[2]);
+            const int idx = collected_id[j];
+            cg::coalesced_group g = cg::coalesced_threads();
+            atomicAggInc(g, &(dL_dcolors[idx * C + 0]), dchannel_dcolor * dL_dpixel[0]);
+            atomicAggInc(g, &(dL_dcolors[idx * C + 1]), dchannel_dcolor * dL_dpixel[1]);
+            atomicAggInc(g, &(dL_dcolors[idx * C + 2]), dchannel_dcolor * dL_dpixel[2]);
             // Update last alpha (to be used in the next iteration)
 
             // Account for fact that alpha also influences how much of
@@ -552,50 +567,15 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
             const float dG_ddelx = -gdx * con_o.x - gdy * con_o.y;
             const float dG_ddely = -gdy * con_o.z - gdx * con_o.y;
 
-            atomicAdd(&s_dL_dmean2D[idx].x, dL_dG * dG_ddelx * ddelx_dx);
-            atomicAdd(&s_dL_dmean2D[idx].y, dL_dG * dG_ddely * ddely_dy);
+            atomicAggInc(g, &dL_dmean2D[idx].x, dL_dG * dG_ddelx * ddelx_dx);
+            atomicAggInc(g, &dL_dmean2D[idx].y, dL_dG * dG_ddely * ddely_dy);
+
             // Update gradients w.r.t. 2D covariance (2x2 matrix, symmetric)
-            atomicAdd(&s_dL_dconic2D_xy[idx].x, -0.5f * gdx * d.x * dL_dG);
-            atomicAdd(&s_dL_dconic2D_xy[idx].y, -0.5f * gdx * d.y * dL_dG);
-            atomicAdd(&s_dL_dconic2D_w[idx], -0.5f * gdy * d.y * dL_dG);
+            atomicAggInc(g, &dL_dconic2D[idx].x, -0.5f * gdx * d.x * dL_dG);
+            atomicAggInc(g, &dL_dconic2D[idx].y, -0.5f * gdx * d.y * dL_dG);
+            atomicAggInc(g, &dL_dconic2D[idx].w, -0.5f * gdy * d.y * dL_dG);
             // Update gradients w.r.t. opacity of the Gaussian
-            atomicAdd(&(s_dL_dopacity[idx]), G * dL_dalpha);
-        }
-        if (block.thread_rank() < max_iterations) {
-
-            const int coll_id = collected_id[block.thread_rank()];
-            float dL_dmean2D_x = 0.f;
-            float dL_dmean2D_y = 0.f;
-            float dL_dconic2D_x = 0.f;
-            float dL_dconic2D_y = 0.f;
-            float dL_dconic2D_w = 0.f;
-            float dL_dopacity_ = 0.f;
-            float dL_dcolors_r = 0.f;
-            float dL_dcolors_g = 0.f;
-            float dL_dcolors_b = 0.f;
-
-            for (int z = 0; z < D; z++) {
-                const int idx = z + block.thread_rank() * D;
-                dL_dmean2D_x += s_dL_dmean2D[idx].x;
-                dL_dmean2D_y += s_dL_dmean2D[idx].y;
-                dL_dconic2D_x += s_dL_dconic2D_xy[idx].x;
-                dL_dconic2D_y += s_dL_dconic2D_xy[idx].y;
-                dL_dconic2D_w += s_dL_dconic2D_w[idx];
-                dL_dopacity_ += s_dL_dopacity[idx];
-                dL_dcolors_r += s_dL_dcolors_rg[idx].x;
-                dL_dcolors_g += s_dL_dcolors_rg[idx].y;
-                dL_dcolors_b += s_dL_dcolors_b[idx];
-            }
-
-            atomicAdd(&(dL_dmean2D[coll_id].x), dL_dmean2D_x);
-            atomicAdd(&(dL_dmean2D[coll_id].y), dL_dmean2D_y);
-            atomicAdd(&(dL_dopacity[coll_id]), dL_dopacity_);
-            atomicAdd(&(dL_dconic2D[coll_id].x), dL_dconic2D_x);
-            atomicAdd(&(dL_dcolors[coll_id * C + 0]), dL_dcolors_r);
-            atomicAdd(&(dL_dconic2D[coll_id].y), dL_dconic2D_y);
-            atomicAdd(&(dL_dcolors[coll_id * C + 1]), dL_dcolors_g);
-            atomicAdd(&(dL_dconic2D[coll_id].w), dL_dconic2D_w);
-            atomicAdd(&(dL_dcolors[coll_id * C + 2]), dL_dcolors_b);
+            atomicAggInc(g, &(dL_dopacity[idx]), G * dL_dalpha);
         }
     }
 }

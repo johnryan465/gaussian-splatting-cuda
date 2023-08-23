@@ -417,9 +417,7 @@ __device__ void atomicAggIncNine(cg::coalesced_group g,
     float *sum_8, float input_8,
     float *sum_9, float input_9)
 {
-    //cg::coalesced_group g = cg::coalesced_threads();
     const int tile_sz = 32;
-    const int sz = g.size();
     auto tile = cg::tiled_partition(g, tile_sz);
     #pragma unroll    
     for (int i = tile.size() / 2; i > 0; i /= 2) {

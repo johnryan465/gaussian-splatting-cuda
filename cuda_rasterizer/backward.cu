@@ -391,18 +391,6 @@ __constant__ float d_bg_color[3]; // RGB
 
 namespace cg = cooperative_groups;
 
-template <int tile_sz>
-__device__ float reduce_sum_tile_shfl(cg::__v1::thread_block_tile<tile_sz> g, float val)
-{
-    // Each iteration halves the number of active threads
-    // Each thread adds its partial sum[i] to sum[lane+i]
-    for (int i = tile_sz / 2; i > 0; i /= 2) {
-        val += g.shfl_down(val, i);
-    }
-
-    return val; // note: only thread 0 will return full sum
-}
-
 
 __device__ void atomicAggInc(cg::coalesced_group g, float *sum, float input)
 {
@@ -415,7 +403,48 @@ __device__ void atomicAggInc(cg::coalesced_group g, float *sum, float input)
         tile_sum += tile.shfl_down(tile_sum, i);
     }    
 
-    if (tile.thread_rank() == 0) atomicAdd(sum, tile_sum);
+    if (tile.thread_rank() == 0)atomicAdd(sum, tile_sum);
+}
+
+__device__ void atomicAggIncNine(cg::coalesced_group g,
+    float *sum_1, float input_1,
+    float *sum_2, float input_2,
+    float *sum_3, float input_3,
+    float *sum_4, float input_4,
+    float *sum_5, float input_5,
+    float *sum_6, float input_6,
+    float *sum_7, float input_7,
+    float *sum_8, float input_8,
+    float *sum_9, float input_9)
+{
+    //cg::coalesced_group g = cg::coalesced_threads();
+    const int tile_sz = 32;
+    const int sz = g.size();
+    auto tile = cg::tiled_partition(g, tile_sz);
+    #pragma unroll    
+    for (int i = tile.size() / 2; i > 0; i /= 2) {
+        input_1 += tile.shfl_down(input_1, i);
+        input_2 += tile.shfl_down(input_2, i);
+        input_3 += tile.shfl_down(input_3, i);
+        input_4 += tile.shfl_down(input_4, i);
+        input_5 += tile.shfl_down(input_5, i);
+        input_6 += tile.shfl_down(input_6, i);
+        input_7 += tile.shfl_down(input_7, i);
+        input_8 += tile.shfl_down(input_8, i);
+        input_9 += tile.shfl_down(input_9, i);
+    }    
+
+    if (tile.thread_rank() == 0){
+        atomicAdd(sum_1, input_1);
+        atomicAdd(sum_2, input_2);
+        atomicAdd(sum_3, input_3);
+        atomicAdd(sum_4, input_4);
+        atomicAdd(sum_5, input_5);
+        atomicAdd(sum_6, input_6);
+        atomicAdd(sum_7, input_7);
+        atomicAdd(sum_8, input_8);
+        atomicAdd(sum_9, input_9);
+    }
 }
 
 template <uint32_t C>
@@ -463,6 +492,7 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
     float accum_rec[C] = {0.f};
     float dL_dpixel[C];
     if (inside) {
+        #pragma unroll
         for (int i = 0; i < C; i++) {
             dL_dpixel[i] = dL_dpixels[i * d_H * d_W + pix_id];
         }
@@ -470,6 +500,11 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
 
     float last_alpha = 0.f;
     float last_color[C] = {0.f};
+
+    float bg_dot_dpixel = 0;
+    bg_dot_dpixel = d_bg_color[0] * dL_dpixel[0];
+    bg_dot_dpixel += d_bg_color[1] * dL_dpixel[1];
+    bg_dot_dpixel += d_bg_color[2] * dL_dpixel[2];
 
     // Gradient of pixel coordinate w.r.t. normalized
     // screen-space viewport corrdinates (-1 to 1)
@@ -498,7 +533,8 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
         block.sync();
 
         const int max_iterations = min(BLOCK_SIZE, toDo);
-        for (int j = 0; !done && j < max_iterations; j++) {
+        const int max_iterations_opt = (!done) ? max_iterations : 0;
+        for (int j = 0; j < max_iterations_opt; j++) {
             // Keep track of current Gaussian ID. Skip, if this one
             // is behind the last contributor for this pixel.
             --contributor;
@@ -545,18 +581,10 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
             T = T / (1.f - alpha);
             const float dchannel_dcolor = alpha * T;
             const int idx = collected_id[j];
-            cg::coalesced_group g = cg::coalesced_threads();
-            atomicAggInc(g, &(dL_dcolors[idx * C + 0]), dchannel_dcolor * dL_dpixel[0]);
-            atomicAggInc(g, &(dL_dcolors[idx * C + 1]), dchannel_dcolor * dL_dpixel[1]);
-            atomicAggInc(g, &(dL_dcolors[idx * C + 2]), dchannel_dcolor * dL_dpixel[2]);
             // Update last alpha (to be used in the next iteration)
 
             // Account for fact that alpha also influences how much of
             // the background color is added if nothing left to blend
-            float bg_dot_dpixel = 0;
-            bg_dot_dpixel = d_bg_color[0] * dL_dpixel[0];
-            bg_dot_dpixel += d_bg_color[1] * dL_dpixel[1];
-            bg_dot_dpixel += d_bg_color[2] * dL_dpixel[2];
             dL_dalpha *= T;
             dL_dalpha += (-T_final / (1.f - alpha)) * bg_dot_dpixel;
 
@@ -567,15 +595,20 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
             const float dG_ddelx = -gdx * con_o.x - gdy * con_o.y;
             const float dG_ddely = -gdy * con_o.z - gdx * con_o.y;
 
-            atomicAggInc(g, &dL_dmean2D[idx].x, dL_dG * dG_ddelx * ddelx_dx);
-            atomicAggInc(g, &dL_dmean2D[idx].y, dL_dG * dG_ddely * ddely_dy);
+            cg::coalesced_group g = cg::coalesced_threads();
 
-            // Update gradients w.r.t. 2D covariance (2x2 matrix, symmetric)
-            atomicAggInc(g, &dL_dconic2D[idx].x, -0.5f * gdx * d.x * dL_dG);
-            atomicAggInc(g, &dL_dconic2D[idx].y, -0.5f * gdx * d.y * dL_dG);
-            atomicAggInc(g, &dL_dconic2D[idx].w, -0.5f * gdy * d.y * dL_dG);
-            // Update gradients w.r.t. opacity of the Gaussian
-            atomicAggInc(g, &(dL_dopacity[idx]), G * dL_dalpha);
+            atomicAggIncNine(g, 
+                &(dL_dcolors[idx * C + 0]), dchannel_dcolor * dL_dpixel[0],
+                &(dL_dcolors[idx * C + 1]),  dchannel_dcolor * dL_dpixel[1],
+                &(dL_dcolors[idx * C + 2]),  dchannel_dcolor * dL_dpixel[2],
+                &(dL_dmean2D[idx].x), dL_dG * dG_ddelx * ddelx_dx,
+                &(dL_dmean2D[idx].y), dL_dG * dG_ddely * ddely_dy,
+                &(dL_dopacity[idx]), G * dL_dalpha,
+                &dL_dconic2D[idx].x, -0.5f * gdx * d.x * dL_dG,
+                &dL_dconic2D[idx].y, -0.5f * gdx * d.y * dL_dG,
+                &dL_dconic2D[idx].w, -0.5f * gdy * d.y * dL_dG
+            );
+
         }
     }
 }

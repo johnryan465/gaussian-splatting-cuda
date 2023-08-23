@@ -470,6 +470,7 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
     const uint2 pix = {pix_min.x + block.thread_index().x, pix_min.y + block.thread_index().y};
     const uint32_t pix_id = d_W * pix.y + pix.x;
     const float2 pixf = {(float)pix.x, (float)pix.y};
+    const int thread_rank = block.thread_rank();
 
     const bool inside = pix.x < d_W && pix.y < d_H;
     const uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
@@ -520,15 +521,15 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
     // Traverse all Gaussians
     for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE) {
         block.sync();
-        const int progress = i * BLOCK_SIZE + block.thread_rank();
+        const int progress = i * BLOCK_SIZE + thread_rank;
         if (range.x + progress < range.y) {
             const int coll_id = point_list[range.y - progress - 1];
-            collected_id[block.thread_rank()] = coll_id;
-            collected_xy[block.thread_rank()] = points_xy_image[coll_id];
-            collected_conic_opacity[block.thread_rank()] = conic_opacity[coll_id];
-            collected_colors_rg[block.thread_rank()].x = colors[coll_id * C + 0];
-            collected_colors_rg[block.thread_rank()].y = colors[coll_id * C + 1];
-            collected_colors_b[block.thread_rank()] = colors[coll_id * C + 2];
+            collected_id[thread_rank] = coll_id;
+            collected_xy[thread_rank] = points_xy_image[coll_id];
+            collected_conic_opacity[thread_rank] = conic_opacity[coll_id];
+            collected_colors_rg[thread_rank].x = colors[coll_id * C + 0];
+            collected_colors_rg[thread_rank].y = colors[coll_id * C + 1];
+            collected_colors_b[thread_rank] = colors[coll_id * C + 2];
         }
         block.sync();
 

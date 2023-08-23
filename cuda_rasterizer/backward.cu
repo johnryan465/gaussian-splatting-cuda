@@ -383,7 +383,6 @@ __global__ void preprocessCUDA(
 // Constants for magic numbers
 __constant__ float ALPHA_THRESHOLD = 1.0f / 255.0f;
 __constant__ float ALPHA_LIMIT = 0.99f;
-const int D = 4;
 
 __constant__ int d_W;
 __constant__ int d_H;
@@ -392,21 +391,7 @@ __constant__ float d_bg_color[3]; // RGB
 namespace cg = cooperative_groups;
 
 
-__device__ void atomicAggInc(cg::coalesced_group g, float *sum, float input)
-{
-    //cg::coalesced_group g = cg::coalesced_threads();
-    const int tile_sz = 32;
-    auto tile = cg::tiled_partition(g, tile_sz);
-    float tile_sum = input;
-    #pragma unroll    
-    for (int i = tile.size() / 2; i > 0; i /= 2) {
-        tile_sum += tile.shfl_down(tile_sum, i);
-    }    
-
-    if (tile.thread_rank() == 0)atomicAdd(sum, tile_sum);
-}
-
-__device__ void atomicAggIncNine(cg::coalesced_group g,
+__forceinline__ __device__ void atomicAggIncNine(cg::coalesced_group g,
     float *sum_1, float input_1,
     float *sum_2, float input_2,
     float *sum_3, float input_3,
@@ -465,11 +450,11 @@ __global__ void __launch_bounds__(BLOCK_X* BLOCK_Y)
     const uint32_t horizontal_blocks = (d_W + BLOCK_X - 1) / BLOCK_X;
     const uint2 pix_min = {block.group_index().x * BLOCK_X, block.group_index().y * BLOCK_Y};
     const uint2 pix_max = {min(pix_min.x + BLOCK_X, d_W), min(pix_min.y + BLOCK_Y, d_H)};
-    const uint2 pix = {pix_min.x + block.thread_index().x, pix_min.y + block.thread_index().y};
+    const uint2 pix = {pix_min.x + threadIdx.x, pix_min.y + threadIdx.y};
     const uint32_t pix_id = d_W * pix.y + pix.x;
     const float2 pixf = {(float)pix.x, (float)pix.y};
-    const int thread_rank = block.thread_rank();
-
+    const int thread_rank = threadIdx.x + threadIdx.y * blockDim.x;
+    
     const bool inside = pix.x < d_W && pix.y < d_H;
     const uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
 
